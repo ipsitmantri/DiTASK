@@ -7,6 +7,7 @@ This repository is the official implementation of [DiTASK: Multi-Task Fine-Tunin
 
 ## Setup
 The repository is built on top of [MTLoRA](https://github.com/scale-lab/MTLoRA) and uses components from [Swin-Transformer](https://github.com/microsoft/Swin-Transformer) and [Multi-Task-Learning-PyTorch](https://github.com/SimonVandenhende/Multi-Task-Learning-PyTorch).
+
 Clone the repository:
 ```bash
 git clone git@github.com:ipsitmantri/dynamic-graph-activation.git
