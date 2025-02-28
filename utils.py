@@ -18,6 +18,7 @@ import imageio
 import scipy.io as sio
 import torch.nn.functional as F
 from models.lora import map_old_state_dict_weights
+from models.vision_transformer_ditask import _convert_openai_clip, _load_weights
 
 
 def mkdir_if_missing(directory):
@@ -27,6 +28,22 @@ def mkdir_if_missing(directory):
         except OSError as e:
             if e.errno != errno.EEXIST:
                 raise
+
+
+def load_checkpoint_vit(config, model, logger):
+    resume_path = config.MODEL.RESUME_BACKBONE
+    logger.info(
+        f"==============> Resuming form {resume_path}....................")
+    checkpoint = torch.load(resume_path, map_location="cpu")
+    DITASK = config.MODEL.DITASK
+    DITASK_enabled = DITASK.ENABLED
+
+    skip_decoder = config.TRAIN.SKIP_DECODER_CKPT
+    new_state_dict = {}
+    for key in checkpoint.keys():
+        pass
+
+
 
 
 def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger, backbone=False, quiet=False):
@@ -39,13 +56,28 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
     else:
         checkpoint = torch.load(resume_path, map_location='cpu')
 
-    mtlora = config.MODEL.MTLORA
-    mtlora_enabled = mtlora.ENABLED
+    DITASK = config.MODEL.DITASK
+    DITASK_enabled = DITASK.ENABLED
 
     skip_decoder = config.TRAIN.SKIP_DECODER_CKPT
 
-    model_state = {k: v for k, v in checkpoint["model"].items(
-    ) if not k.startswith("decoders")} if skip_decoder else checkpoint["model"]
+    # print(checkpoint.keys())
+    # for k, v in model.named_parameters():
+    #     print(k)
+    # exit(0)
+
+    # if config.MODEL.TYPE == "vit":
+    #     _load_weights(model, resume_path)
+    # print(model)
+    # exit(0)
+
+    if "model" in checkpoint.keys():
+        model_state = {k: v for k, v in checkpoint["model"].items(
+        ) if not k.startswith("decoders")} if skip_decoder else checkpoint["model"]
+    else:
+        model_state = {k: v for k, v in checkpoint.items()}
+        # model_state = _convert_openai_clip(model_state, None)
+        model_state = {k: v for k, v in model_state.items() if not k.startswith("decoders")} if skip_decoder else model_state
 
     # delete attn_mask since we always re-init it
     attn_mask_keys = [k for k in model_state.keys() if "attn_mask" in k]
@@ -113,19 +145,31 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
                         1, 2)
                     model_state[k] = absolute_pos_embed_pretrained_resized
 
-    if mtlora_enabled:
+    if DITASK_enabled:
         mapping = {}
         trainable_layers = []
-        if mtlora.QKV_ENABLED:
-            trainable_layers.extend(["attn.qkv.weight", "attn.qkv.bias"])
-        if mtlora.PROJ_ENABLED:
-            trainable_layers.extend(["attn.proj.weight", "attn.proj.bias"])
-        if mtlora.FC1_ENABLED:
-            trainable_layers.extend(["mlp.fc1.weight", "mlp.fc1.bias"])
-        if mtlora.FC2_ENABLED:
-            trainable_layers.extend(["mlp.fc2.weight", "mlp.fc2.bias"])
-        if mtlora.DOWNSAMPLER_ENABLED:
-            trainable_layers.extend(["downsample.reduction.weight"])
+        if config.MODEL.TYPE == "swin" or config.MODEL.TYPE == "vit":
+            if DITASK.QKV_ENABLED:
+                trainable_layers.extend(["attn.qkv.weight", "attn.qkv.bias"])
+            if DITASK.PROJ_ENABLED:
+                trainable_layers.extend(["attn.proj.weight", "attn.proj.bias"])
+            if DITASK.FC1_ENABLED:
+                trainable_layers.extend(["mlp.fc1.weight", "mlp.fc1.bias"])
+            if DITASK.FC2_ENABLED:
+                trainable_layers.extend(["mlp.fc2.weight", "mlp.fc2.bias"])
+            if DITASK.DOWNSAMPLER_ENABLED:
+                trainable_layers.extend(["downsample.reduction.weight"])
+        elif config.MODEL.TYPE == "pvt":
+            if DITASK.QKV_ENABLED:
+                trainable_layers.extend(["attn.q.weight", "attn.kv.weight", "attn.q.bias", "attn.kv.bias"])
+            if DITASK.PROJ_ENABLED:
+                trainable_layers.extend(["attn.proj.weight", "attn.proj.bias"])
+            if DITASK.FC1_ENABLED:
+                trainable_layers.extend(["mlp.fc1.weight", "mlp.fc1.bias"])
+            if DITASK.FC2_ENABLED:
+                trainable_layers.extend(["mlp.fc2.weight", "mlp.fc2.bias"])
+            if DITASK.DOWNSAMPLER_ENABLED:
+                trainable_layers.extend(["downsample.reduction.weight"])
 
         for k, v in model_state.items():
             last_three = ".".join(k.split(".")[-3:])
@@ -137,8 +181,8 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, loss_scaler, logger,
         if not len(mapping):
             print("No keys needs to be mapped for LoRA")
         model_state = map_old_state_dict_weights(
-            model_state, mapping, "", config.MODEL.MTLORA.SPLIT_QKV)
-    missing, unexpected = model.load_state_dict(model_state, strict=False)
+            model_state, mapping, "", config.MODEL.DITASK.SPLIT_QKV)
+    missing, unexpected = model.load_state_dict(model_state, strict=False, assign=False)
     if not quiet:
         if len(missing) > 0:
             logger.warning("=============Missing Keys==============")

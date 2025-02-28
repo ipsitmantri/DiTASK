@@ -510,3 +510,27 @@ class HighResolutionHead(nn.Module):
         x = torch.cat([x[0], x1, x2, x3], 1)
         x = self.last_layer(x)
         return x
+
+class HighResolutionHeadCLIP(nn.Module):
+    def __init__(self, backbone_channels, num_outputs):
+        super(HighResolutionHeadCLIP, self).__init__()
+        last_inp_channels = backbone_channels
+        self.last_layer = nn.Sequential(
+            nn.Conv2d(
+                in_channels=last_inp_channels,
+                out_channels=last_inp_channels*4,
+                kernel_size=1,
+                stride=1,
+                padding=0),
+            nn.BatchNorm2d(last_inp_channels*4, momentum=0.1),
+            nn.ReLU(inplace=False),
+            nn.Conv2d(
+                in_channels=last_inp_channels*4,
+                out_channels=num_outputs,
+                kernel_size=1,
+                stride=1,
+                padding=0))
+
+    def forward(self, x):
+        x = self.last_layer(x)
+        return x

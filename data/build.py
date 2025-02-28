@@ -9,8 +9,9 @@ import os
 import torch
 import numpy as np
 import torch.distributed as dist
+import torch.utils
 from torchvision import datasets, transforms
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, OPENAI_CLIP_MEAN, OPENAI_CLIP_STD
 from timm.data import Mixup
 from timm.data import create_transform
 
@@ -55,13 +56,13 @@ def build_loader(config):
 
     num_tasks = dist.get_world_size()
     global_rank = dist.get_rank()
-    if config.DATA.ZIP_MODE and config.DATA.CACHE_MODE == 'part':
+    if False:
         indices = np.arange(dist.get_rank(), len(
             dataset_train), dist.get_world_size())
         sampler_train = SubsetRandomSampler(indices)
     else:
         sampler_train = torch.utils.data.DistributedSampler(
-            dataset_train, num_replicas=num_tasks, rank=global_rank, shuffle=True
+            dataset_train
         )
 
     if config.TEST.SEQUENTIAL:
@@ -70,13 +71,15 @@ def build_loader(config):
         sampler_val = torch.utils.data.distributed.DistributedSampler(
             dataset_val, shuffle=config.TEST.SHUFFLE
         )
-
+    sampler_train = torch.utils.data.distributed.DistributedSampler(dataset_train)
+    sampler_val = torch.utils.data.distributed.DistributedSampler(dataset_val)
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=config.DATA.BATCH_SIZE,
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
         drop_last=True,
+        shuffle=False
     )
 
     data_loader_val = torch.utils.data.DataLoader(
@@ -85,7 +88,7 @@ def build_loader(config):
         shuffle=False,
         num_workers=config.DATA.NUM_WORKERS,
         pin_memory=config.DATA.PIN_MEMORY,
-        drop_last=False
+        drop_last=False,
     )
 
     # setup mixup / cutmix
@@ -165,7 +168,10 @@ def build_transform(is_train, config):
             )
 
     t.append(transforms.ToTensor())
-    t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
+    if config.MODEL.TYPE == "swin":
+        t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
+    elif config.MODEL.TYPE == "clip":
+        t.append(transforms.Normalize(OPENAI_CLIP_MEAN, OPENAI_CLIP_STD))
     return transforms.Compose(t)
 
 

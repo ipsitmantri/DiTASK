@@ -20,6 +20,7 @@ import torch.distributed as dist
 
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 from timm.utils import accuracy, AverageMeter
+import torch.distributed
 
 from config import get_config
 from models import build_model, build_mtl_model
@@ -33,6 +34,8 @@ from mtl_loss_schemes import MultiTaskLoss, get_loss
 from evaluation.evaluate_utils import PerformanceMeter, get_output
 from ptflops import get_model_complexity_info
 from models.lora import mark_only_lora_as_trainable
+
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 try:
     import wandb
@@ -66,7 +69,7 @@ def parse_option():
     parser.add_argument('--data-path', type=str, help='path to dataset')
     parser.add_argument('--zip', action='store_true',
                         help='use zipped dataset instead of folder dataset')
-    parser.add_argument('--cache-mode', type=str, default='part', choices=['no', 'full', 'part'],
+    parser.add_argument('--cache-mode', type=str, default='no', choices=['no', 'full', 'part'],
                         help='no: no cache, '
                              'full: cache all data, '
                              'part: sharding the dataset into nonoverlapping pieces and only cache one piece')
@@ -140,23 +143,27 @@ def parse_option():
 def main(config):
     dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(
         config)
-
+    
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     teacher = None
     model = build_model(config)
     if config.MTL:
         model = build_mtl_model(model, config)
+    # print(model)
 
     n_parameters = sum(p.numel() for p in model.parameters())
     logger.info(f"number of params: {n_parameters / 1e6} M")
 
-    model.cuda()
-    macs, params = get_model_complexity_info(model, (3, config.DATA.IMG_SIZE, config.DATA.IMG_SIZE), as_strings=True,
+    # model.cuda()
+    rank = int(os.environ['LOCAL_RANK'])
+    model = model.to(rank)
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    macs, params = get_model_complexity_info(model.module, (3, config.DATA.IMG_SIZE, config.DATA.IMG_SIZE), as_strings=True,
                                              print_per_layer_stat=False, verbose=False)
 
     logger.info(f"ptflops GMACS = {macs} and params = {params}")
 
-    model_without_ddp = model
+    model_without_ddp = model.module
 
     optimizer = build_optimizer(config, model)
 
@@ -243,19 +250,19 @@ def main(config):
     if config.THROUGHPUT_MODE:
         throughput(data_loader_val, model, logger)
         return
-    if config.MODEL.MTLORA.ENABLED:
-        if config.MODEL.MTLORA.FREEZE_PRETRAINED:
+    if config.MODEL.DITASK.ENABLED:
+        if config.MODEL.DITASK.FREEZE_PRETRAINED:
             print("\nMarking LoRA params only as trainable:")
-            mark_only_lora_as_trainable(model.backbone,
-                                        bias=config.MODEL.MTLORA.BIAS,
+            mark_only_lora_as_trainable(model.module.backbone,
+                                        bias=config.MODEL.DITASK.BIAS,
                                         freeze_patch_embed=config.TRAIN.FREEZE_PATCH_EMBED,
                                         freeze_norm=config.TRAIN.FREEZE_LAYER_NORM,
                                         free_relative_bias=config.TRAIN.FREEZE_RELATIVE_POSITION_BIAS,
-                                        freeze_downsample_reduction=True if config.MODEL.MTLORA.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
+                                        freeze_downsample_reduction=True if config.MODEL.DITASK.DOWNSAMPLER_ENABLED else config.TRAIN.FREEZE_DOWNSAMPLE_REDUCTION)
         else:
             print("Marking all layers as trainable")
     if config.MODEL.FREEZE_BACKBONE:
-        assert (not config.MODEL.MTLORA.ENABLED)
+        assert (not config.MODEL.DITASK.ENABLED)
         print("Freezing backbone.........")
         model.freeze_backbone()
     trainable_params = sum(p.numel()
@@ -264,7 +271,6 @@ def main(config):
                       if p.requires_grad and 'lora' in name)
     total_model_params = sum(p.numel() for p in model.parameters())
     total_model_params_without_lora = total_model_params - lora_params
-    # number of params that are not not in the backbone
     decoder_params = sum(p.numel() for name, p in model.named_parameters()
                          if 'backbone' not in name)
 
@@ -280,8 +286,10 @@ Total params without LoRA:  {total_model_params_without_lora:,} (trainable ratio
     start_time = time.perf_counter()
 
     epoch = 0
+    # print(model)
+    # exit(0)
     for epoch in range(config.TRAIN.EPOCHS):
-        if not config.MTL:
+        if config.MTL:
             data_loader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
@@ -318,15 +326,15 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     start = time.perf_counter()
     end = time.perf_counter()
     loss_dict = None
-
+    rank = int(os.environ['LOCAL_RANK'])
     for idx, batch in enumerate(data_loader):
         if not config.MTL:
             samples, targets = batch
             samples = samples.cuda(non_blocking=True)
             targets = targets.cuda(non_blocking=True)
         else:
-            samples = batch['image'].cuda(non_blocking=True)
-            targets = {task: batch[task].cuda(
+            samples = batch['image'].to(rank, non_blocking=True)
+            targets = {task: batch[task].to(rank,
                 non_blocking=True) for task in config.TASKS}
 
         if mixup_fn is not None:
@@ -377,7 +385,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             if loss_dict is not None:
                 for task, task_loss in loss_dict.items():
                     metrics[f"train/tasks/{task}/loss"] = task_loss.item()
-            wandb.log(metrics)
+            if dist.get_rank() == 0:
+                wandb.log(metrics)
 
         if idx % config.PRINT_FREQ == 0:
             lr = optimizer.param_groups[0]['lr']
@@ -422,7 +431,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 scores_logs["train/tasks/depth/rmse"] = scores['depth']['rmse']
                 scores_logs["train/tasks/depth/log_rmse"] = scores['depth']['log_rmse']
 
-            wandb.log(scores_logs)
+            if dist.get_rank() == 0:
+                wandb.log(scores_logs)
 
     epoch_time = time.perf_counter() - start
     logger.info(
@@ -435,6 +445,7 @@ def validate(config, data_loader, model, epoch):
     tasks = config.TASKS
     performance_meter = PerformanceMeter(config, config.DATA.DBNAME)
     loss_meter = AverageMeter()
+    rank = int(os.environ['LOCAL_RANK'])
 
     loss_ft = torch.nn.ModuleDict(
         {task: get_loss(config['TASKS_CONFIG'], task, config) for task in config.TASKS})
@@ -450,7 +461,7 @@ def validate(config, data_loader, model, epoch):
     for t in config.TASKS:
         loss_weights[t] = all_loss_weights[t]
     criterion = MultiTaskLoss(config.TASKS, loss_ft, loss_weights)
-
+    data_loader.sampler.set_epoch(epoch)
     model.eval()
     num_val_points = 0
     logger.info("Start eval")
@@ -459,8 +470,8 @@ def validate(config, data_loader, model, epoch):
     for i, batch in enumerate(data_loader):
         # Forward pass
         logger.debug(f"Image ID = {batch['meta']['image']}")
-        images = batch['image'].cuda(non_blocking=True)
-        targets = {task: batch[task].cuda(
+        images = batch['image'].to(rank, non_blocking=True)
+        targets = {task: batch[task].to(rank,
             non_blocking=True) for task in tasks}
 
         output = model(images)
@@ -485,7 +496,8 @@ def validate(config, data_loader, model, epoch):
             if loss_dict is not None:
                 for task, task_loss in loss_dict.items():
                     metrics[f"val/tasks/{task}/loss"] = task_loss.item()
-            wandb.log(metrics)
+            if dist.get_rank() == 0:
+                wandb.log(metrics)
 
     logger.info(f"val loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t")
 
@@ -516,7 +528,9 @@ def validate(config, data_loader, model, epoch):
             scores_logs["val/tasks/depth/rmse"] = eval_results['depth']['rmse']
             scores_logs["val/tasks/depth/log_rmse"] = eval_results['depth']['log_rmse']
 
-        wandb.log(scores_logs)
+        # scores_logs["val/delta_m"] = np.mean([(eval_results['semseg']['mIoU']-67.21)/67.21, (eval_results['human_parts']['mIoU']-61.93)/61.93, (eval_results['sal']['mIoU']-62.35)/62.35, (17.97-eval_results['normals']['rmse'])/17.97]) * 100
+        if dist.get_rank() == 0:
+            wandb.log(scores_logs)
 
     return eval_results
 
@@ -555,12 +569,12 @@ if __name__ == '__main__':
     else:
         rank = -1
         world_size = -1
-    torch.cuda.set_device(config.LOCAL_RANK)
+    torch.cuda.set_device(rank)
     torch.distributed.init_process_group(
         backend='nccl', init_method='env://', world_size=world_size, rank=rank)
     torch.distributed.barrier()
 
-    seed = config.SEED + dist.get_rank()
+    seed = config.SEED #+ dist.get_rank()
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     np.random.seed(seed)
@@ -584,13 +598,17 @@ if __name__ == '__main__':
     config.TRAIN.WARMUP_LR = linear_scaled_warmup_lr
     config.TRAIN.MIN_LR = linear_scaled_min_lr
     config.freeze()
-
-    os.makedirs(config.OUTPUT, exist_ok=True)
-    logger = create_logger(output_dir=config.OUTPUT,
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = os.path.join(config.OUTPUT, f"run_{timestamp}")
+    config.defrost()
+    config.OUTPUT = output_dir
+    config.freeze()
+    os.makedirs(output_dir, exist_ok=True)
+    logger = create_logger(output_dir=output_dir,
                            dist_rank=dist.get_rank(), name=f"{config.MODEL.NAME}")
 
     if dist.get_rank() == 0:
-        path = os.path.join(config.OUTPUT, "config.json")
+        path = os.path.join(output_dir, "config.json")
         with open(path, "w") as f:
             f.write(config.dump())
         logger.info(f"Full config saved to {path}")
@@ -608,9 +626,12 @@ if __name__ == '__main__':
             else:
                 wandb.login(key=os.getenv("WANDB_API_KEY"))
             config_name = f"{os.path.basename(os.path.dirname(args.cfg))}/{os.path.basename(args.cfg)}"
-            wandb.init(project='MTLoRA', config=config,
+            torch.distributed.barrier()
+            if dist.get_rank() == 0:
+                wandb.init(project='DITASK', config=config,
                        name=config_name if not args.run_name else args.run_name)
-            wandb.config.update({'args': vars(args)})
+                wandb.config.update({'args': vars(args)})
+            torch.distributed.barrier()
         except wandb.exc.LaunchError:
             logger.warnning("Could not initialize wandb. Logging is disabled.")
             wandb_available = False

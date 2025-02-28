@@ -5,9 +5,17 @@
 # Written by Ze Liu
 # --------------------------------------------------------
 
-from .swin_transformer_mtlora import SwinTransformerMTLoRA
+from .swin_transformer_ditask import SwinTransformerDiTASK
 from .swin_transformer import SwinTransformer
 from .swin_mtl import MultiTaskSwin
+from .vision_transformer import VisionTransformer
+from .vision_transformer_ditask import VisionTransformerDiTASK
+from .clip_mtl import MultiTaskCLIP
+# from .pvt import PyramidVisionTransformer, pvt_tiny
+from .pvt_ditask import PyramidVisionTransformerMTL, pvt_small_mtl
+from .pvt_mtl import MultiTaskPVT
+from .pvt_v2 import PyramidVisionTransformerV2, pvt_v2_b2, pvt_v2_b5
+import timm
 
 
 def build_model(config, is_pretrain=False):
@@ -26,8 +34,8 @@ def build_model(config, is_pretrain=False):
         layernorm = nn.LayerNorm
 
     if model_type == 'swin':
-        if config.MODEL.MTLORA.ENABLED:
-            model = SwinTransformerMTLoRA(img_size=config.DATA.IMG_SIZE,
+        if config.MODEL.DITASK.ENABLED:
+            model = SwinTransformerDiTASK(img_size=config.DATA.IMG_SIZE,
                                           patch_size=config.MODEL.SWIN.PATCH_SIZE,
                                           in_chans=config.MODEL.SWIN.IN_CHANS,
                                           num_classes=config.MODEL.NUM_CLASSES,
@@ -46,7 +54,7 @@ def build_model(config, is_pretrain=False):
                                           use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                           fused_window_process=config.FUSED_WINDOW_PROCESS,
                                           tasks=config.TASKS,
-                                          mtlora=config.MODEL.MTLORA)
+                                          DITASK=config.MODEL.DITASK)
         else:
             model = SwinTransformer(img_size=config.DATA.IMG_SIZE,
                                     patch_size=config.MODEL.SWIN.PATCH_SIZE,
@@ -66,6 +74,50 @@ def build_model(config, is_pretrain=False):
                                     patch_norm=config.MODEL.SWIN.PATCH_NORM,
                                     use_checkpoint=config.TRAIN.USE_CHECKPOINT,
                                     fused_window_process=config.FUSED_WINDOW_PROCESS)
+    
+    elif model_type == "vit":
+        if config.MODEL.DITASK.ENABLED:
+            model = VisionTransformerDiTASK(
+                img_size=config.DATA.IMG_SIZE,
+            num_classes=config.MODEL.NUM_CLASSES,
+            embed_dim=config.MODEL.SWIN.EMBED_DIM,
+            depth=sum(config.MODEL.SWIN.DEPTHS),
+            patch_size=config.MODEL.SWIN.PATCH_SIZE,
+            num_heads=config.MODEL.SWIN.NUM_HEADS[0],
+            qkv_bias=config.MODEL.CLIP.QKV_BIAS,
+            drop_rate=config.MODEL.DROP_RATE,
+            drop_path_rate=config.MODEL.DROP_PATH_RATE,
+            norm_layer=layernorm,
+            in_chans=config.MODEL.SWIN.IN_CHANS,
+            pre_norm=False,
+            tasks=config.TASKS,
+            DITASK=config.MODEL.DITASK
+            )
+        else:
+            model = VisionTransformer(
+            img_size=config.DATA.IMG_SIZE,
+            num_classes=config.MODEL.NUM_CLASSES,
+            embed_dim=config.MODEL.CLIP.EMBED_DIM,
+            depth=config.MODEL.CLIP.DEPTH,
+            patch_size=config.MODEL.CLIP.PATCH_SIZE,
+            num_heads=config.MODEL.CLIP.NUM_HEADS,
+            qkv_bias=config.MODEL.CLIP.QKV_BIAS,
+            drop_rate=config.MODEL.DROP_RATE,
+            drop_path_rate=config.MODEL.DROP_PATH_RATE,
+            norm_layer=layernorm,
+            in_chans=config.MODEL.CLIP.IN_CHANS,
+            pre_norm=config.MODEL.CLIP.PRE_NORM
+        )
+    
+    elif model_type == "pvt":
+        model = timm.create_model(
+                config.MODEL.NAME,
+                num_classes=config.MODEL.NUM_CLASSES,
+                img_size=config.DATA.IMG_SIZE,
+                tasks=config.TASKS,
+                DITASK=config.MODEL.DITASK
+        )
+
     else:
         raise NotImplementedError(f"Unkown model: {model_type}")
 
@@ -73,5 +125,10 @@ def build_model(config, is_pretrain=False):
 
 
 def build_mtl_model(backbone, config):
-    model = MultiTaskSwin(backbone, config)
+    if config.MODEL.TYPE == "swin":
+        model = MultiTaskSwin(backbone, config)
+    elif config.MODEL.TYPE == "vit":
+        model = MultiTaskCLIP(backbone, config)
+    elif config.MODEL.TYPE == "pvt":
+        model = MultiTaskPVT(backbone, config)
     return model
