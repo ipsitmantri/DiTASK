@@ -30,7 +30,7 @@ Download the Swin-Transformer weights pre-trained on ImageNet-22K from the [offi
 
 ## Running DiTASK
 ```bash
-torchrun --nproc_per_node=8 --nnodes=1 main.py --cfg configs/ditask/tiny_448/ditask_tiny_448_r64.yaml --pascal <path-to-PASCAL-Context root> --tasks semsge,human_parts,normals,sal --batch-size 64 --ckpt-freq 20 --epoch 300 --resume-backbone swin_tiny_patch4_window7_224_22k.pth
+torchrun --nproc_per_node=8 --nnodes=1 main.py --cfg configs/ditask/ditask_tiny_448_r64.yaml --pascal <path-to-PASCAL-Context root> --tasks semsge,human_parts,normals,sal --batch-size 64 --ckpt-freq 20 --epoch 300 --resume-backbone swin_tiny_patch4_window7_224_22k.pth
 ```
 
 
