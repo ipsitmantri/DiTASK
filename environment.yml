@@ -1,4 +1,4 @@
-name: diform
+name: ditask
 channels:
   - pytorch
   - nvidia
@@ -251,4 +251,4 @@ dependencies:
       - zope-deprecation==5.0
       - zope-interface==7.1.0
       - zope-sqlalchemy==3.1
-prefix: /home/mantrik/miniconda3/envs/diform
+prefix: ~/miniconda3/envs/ditask
